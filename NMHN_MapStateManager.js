@@ -76,6 +76,8 @@ NMHN.MapStateM.version = 1.00;
  * ============================================================================
  * Changelog
  * ============================================================================
+ * Version 1.01:
+ * update에서 맵 이동(reserveTransfer) 시 Exit가 인식되지 않는 비동기 이슈 발생 개선
  * Version 1.00:
  * - 플러그인 완성
  */
@@ -216,11 +218,12 @@ NMHN.MapStateM.version = 1.00;
         if (!this._mapStateExitPending) { ///중복 풀 등록 방지 조건 코드
             //[WTF] 이 조건식 없으면 게임 실행 오류 남...
             const meta = parseMapStateMeta();
-            if (!meta) return;
-            if (!meta.exitRef) return;
-
-            NMHN.MapStateM.Exit();             // Exit interp를 풀에 등록
-            this._mapStateExitPending = true;  // 이동 지연 플래그
+            if (meta)
+                if (meta.exitRef)
+                {
+                    NMHN.MapStateM.Exit();             // Exit interp를 풀에 등록
+                    this._mapStateExitPending = true;  // 이동 지연 플래그
+                }
         }
     };
     const _Game_Player_isTransferring = Game_Player.prototype.isTransferring;
@@ -258,17 +261,23 @@ NMHN.MapStateM.version = 1.00;
         _Scene_Map_update.call(this);
 
         // 풀 업데이트 — 완료된 것은 제거(Update는 완료 후 풀에서 제거 후 Update 함수에서 재등록하는 구조)
-        $gameMap._mapStateInterps = $gameMap._mapStateInterps.filter(interp => {
+        var interps = $gameMap._mapStateInterps;
+        var index = 0;
+        while (index < interps.length) {
+            var interp = interps[index];
             interp.update();
-            const stillRunning = interp.isRunning();
+            var stillRunning = interp.isRunning();
 
             // Exit 이벤트가 완료된 순간 → 맵 이동 지연 해제
             if (!stillRunning && interp._msRole === 'exit') {
                 $gamePlayer._mapStateExitPending = false;
             }
-
-            return stillRunning;
-        });
+            if (!stillRunning) {
+                interps.splice(index, 1);
+            } else {
+                index++;
+            }
+        }
 
         NMHN.MapStateM.Update();
     };
