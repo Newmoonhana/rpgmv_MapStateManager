@@ -76,8 +76,12 @@ NMHN.MapStateM.version = 1.00;
  * ============================================================================
  * Changelog
  * ============================================================================
+ * Version 1.02:
+ * 특정 맵(원인 확인 불가)에서 Enter->Exit 바로 호출되는 버그 개선
+ * [DESC] 해당 개선은 도저히 원인을 모르겠어서 일단 깃코파일럿의 힘을 빌려 임시 개선함. 코드 구조가 상당히 더러워졌으므로 개선이 필요함.
+ *        (메모)코파일럿 피셜: "Enter 이벤트가 실행 중에 code 201로 전송이 발생하면, Game_Player.prototype.reserveTransfer의 후크가 실행되고 NMHN.MapStateM.Exit()가 호출됩니다. Enter 내부에서 발생한 전송도 “일반적인 맵 퇴장”으로 판단되어 Exit가 즉시 실행됩니다."
  * Version 1.01:
- * update에서 맵 이동(reserveTransfer) 시 Exit가 인식되지 않는 비동기 이슈 발생 개선
+ * update 내부에서 맵 이동 실행 시 Exit가 시작되지 않는 비동기 이슈 발생 개선
  * Version 1.00:
  * - 플러그인 완성
  */
@@ -182,7 +186,6 @@ NMHN.MapStateM.version = 1.00;
         this._mapStateInterps = [];
         stateKey = 'enter';
         NMHN.MapStateM.Enter();
-        stateKey = 'update';
     };
     // enter 또는 exit 이벤트 진행 중 플레이어 조작 가능 이슈 개선(enter 이벤트가 실행 중이면 이벤트 실행 중으로 간주)
     const _Game_Map_isEventRunning = Game_Map.prototype.isEventRunning;
@@ -221,8 +224,13 @@ NMHN.MapStateM.version = 1.00;
             if (meta)
                 if (meta.exitRef)
                 {
-                    NMHN.MapStateM.Exit();             // Exit interp를 풀에 등록
-                    this._mapStateExitPending = true;  // 이동 지연 플래그
+                    if (stateKey === 'update') {
+                        NMHN.MapStateM.Exit();             // Exit interp를 풀에 등록
+                        this._mapStateExitPending = true;  // 이동 지연 플래그
+                    } else if (stateKey === 'enter') {
+                        this._mapStateExitPending = true;
+                        this._mapStateExitDeferred = true;  //exit 이벤트 enter 끝난 후 삽입
+                    }
                 }
         }
     };
@@ -259,6 +267,18 @@ NMHN.MapStateM.version = 1.00;
     const _Scene_Map_update = Scene_Map.prototype.update;
     Scene_Map.prototype.update = function() {
         _Scene_Map_update.call(this);
+
+        // enter 이벤트가 완료된 순간부터 update 시작
+        if (stateKey === 'enter') {
+            if (!$gameMap._mapStateInterps.some(i => i._msRole === 'enter')) {
+                stateKey = 'update';
+                //exit 지연 상태일 시
+                if ($gamePlayer._mapStateExitDeferred) {
+                    $gamePlayer._mapStateExitDeferred = false;
+                    NMHN.MapStateM.Exit();
+                }
+            }
+        }
 
         // 풀 업데이트 — 완료된 것은 제거(Update는 완료 후 풀에서 제거 후 Update 함수에서 재등록하는 구조)
         var interps = $gameMap._mapStateInterps;
