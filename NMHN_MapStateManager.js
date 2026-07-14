@@ -53,6 +53,7 @@ NMHN.MapStateM.version = 1.00;
  * ex2) <MapStateM:3-1,0,3-2>
  * 
  * (※) 해당 연결 이벤트는 플레이어가 접근하지 못하도록 설정 필요(ex: 제일 마지막 장에 빈 이벤트 페이지를 할당)
+ * (※※) 이 플러그인 상의 Update는 Enter과 Exit가 진행되는 동안은 Update가 호출되지 않는 구조임 참고. 만약 다른 이벤트 동안 호출하고 싶은 루프 이벤트가 있을 시, 기존 (RPG MV 정통 방식대로 병렬 이벤트 처리) 방식으로 구현.
  * (TIP) 연결 이벤트들은 위 ※으로 인해 캐릭터 스프라이트를 등록해도 보이지 않으므로, 더미 스프라이트를 만들어 이벤트에 넣으면 에디터에서 구분하기 편함.
  *
  * ----------
@@ -76,10 +77,10 @@ NMHN.MapStateM.version = 1.00;
  * ============================================================================
  * Changelog
  * ============================================================================
+ * Version 2.00:
+ * new Game_Interpreter 생성 방식으로 구조 변경
  * Version 1.02:
  * 특정 맵(원인 확인 불가)에서 Enter->Exit 바로 호출되는 버그 개선
- * [DESC] 해당 개선은 도저히 원인을 모르겠어서 일단 깃코파일럿의 힘을 빌려 임시 개선함. 코드 구조가 상당히 더러워졌으므로 개선이 필요함.
- *        (메모)코파일럿 피셜: "Enter 이벤트가 실행 중에 code 201로 전송이 발생하면, Game_Player.prototype.reserveTransfer의 후크가 실행되고 NMHN.MapStateM.Exit()가 호출됩니다. Enter 내부에서 발생한 전송도 “일반적인 맵 퇴장”으로 판단되어 Exit가 즉시 실행됩니다."
  * Version 1.01:
  * update 내부에서 맵 이동 실행 시 Exit가 시작되지 않는 비동기 이슈 발생 개선
  * Version 1.00:
@@ -131,7 +132,7 @@ NMHN.MapStateM.version = 1.00;
     // =========================================================================
     // 유틸
     // =========================================================================
-    function getMapTechName() { //현재 맵 이름
+    function getMapTechName() { //현재 맵 이름 리턴(맵 이름 == 기술 이름으로 취급)
         if (!$dataMapInfos) return null;
         if (!$dataMap) return null;
         if (!$dataMap.meta) return null;
@@ -149,156 +150,186 @@ NMHN.MapStateM.version = 1.00;
         if (!page) return null;
         return page.list;
     }
-    // 이벤트 페이지 커맨드를 새 Game_Interpreter로 실행
-    // 생성된 인터프리터는 $gameMap._mapStateInterps 에 추가 후 Game_Map.update 훅에서 매 프레임 실행
-    function runEventPage(_ref, _role) {
-        if (!_ref) return;
+
+    // =========================================================================
+    // Interpreter Pool
+    // -------------------------------------------------------------------------
+    // enter / exit / update 세 역할의 Game_Interpreter 인스턴스를 한 배열에서 관리
+    // 실제 폴링(매 프레임 update + 완료 시 제거)은 Game_Map.prototype.update 에서 processPool()로 처리
+    // =========================================================================
+    let stateKey = 'enter'; // 현재 상태, 'enter' -> 'update' (재귀) -> 'exit'
+ 
+    function isRoleRunning(role) {
+        if (!$gameMap._msPool) return false;
+        return $gameMap._msPool.some(i => i._msRole === role && i.isRunning());
+    }
+ 
+    function pushInterp(_ref, _role) {  //이벤트 등록 (new Game_Interpreter 방식)
+        if (!_ref) return false;
         const list = getEventPageList(_ref.eventId, _ref.pageIndex);
-        if (!list) return;
+        if (!list) return false;
  
         const interp = new Game_Interpreter(0);
         interp.setup(list, _ref.eventId);
         interp._msRole = _role;
-        $gameMap._mapStateInterps.push(interp);
-
-        if ($gameTemp.isPlaytest())
-            if (NMHN.MapStateM.isShowDetailLogs) {
-                console.log('[MapStateM] runEventPage _role=' +_role + ' eventId=' + _ref.eventId + ' page=' + (_ref.pageIndex + 1));
-            }
+        $gameMap._msPool.push(interp);
+ 
+        if ($gameTemp.isPlaytest()) if (NMHN.MapStateM.isShowDetailLogs) {
+            console.log('[MapStateM] pushInterp _role=' + _role + ' eventId=' + _ref.eventId + ' page=' + (_ref.pageIndex + 1));
+        }
+        return true;
     }
-
-    let stateKey = 'enter';
-
-    NMHN.MapStateM.Enter = function() {
-        if ($gameTemp.isPlaytest())
-            if (NMHN.MapStateM.isShowLogs)
-                console.log('[MapStateM] Enter: ' + getMapTechName());
-
+ 
+    // -------------------------------------------------------------------------
+    // Enter
+    // -------------------------------------------------------------------------
+    NMHN.MapStateM.Enter = function () {
+        if ($gameTemp.isPlaytest()) if (NMHN.MapStateM.isShowLogs) {
+            console.log('[MapStateM] Enter: ' + getMapTechName());
+        }
+ 
         const meta = parseMapStateMeta();
         if (!meta) return;
-        if (!meta.enterRef) return;
-
-        runEventPage(meta.enterRef, 'enter');
-    }
+        pushInterp(meta.enterRef, 'enter');
+    };
+ 
     const _Game_Map_setup = Game_Map.prototype.setup;
     Game_Map.prototype.setup = function (mapId) {
         _Game_Map_setup.call(this, mapId);
-        this._mapStateInterps = [];
+        this._msPool = [];
         stateKey = 'enter';
         NMHN.MapStateM.Enter();
     };
-    // enter 또는 exit 이벤트 진행 중 플레이어 조작 가능 이슈 개선(enter 이벤트가 실행 중이면 이벤트 실행 중으로 간주)
-    const _Game_Map_isEventRunning = Game_Map.prototype.isEventRunning;
-    Game_Map.prototype.isEventRunning = function() {
-        if (_Game_Map_isEventRunning.call(this)) return true;
-
-        if (this._mapStateInterps) {
-            return this._mapStateInterps.some(i => (i._msRole === 'enter' || i._msRole === 'exit') && i.isRunning());
-        }
-        return false;
-    };
-
-    NMHN.MapStateM.Exit = function() {
+ 
+    // -------------------------------------------------------------------------
+    // Exit
+    // -------------------------------------------------------------------------
+    NMHN.MapStateM.Exit = function () {
         if (getMapTechName() == null) return;
-        if (stateKey != 'update') return;
+        if (stateKey === 'enter') return; // enter 상태가 종료되지 않은 경우 exit 진입 불가
+        if (stateKey === 'exit') return; // exit 이벤트 이미 진행 도중 중복 호출 방지
         stateKey = 'exit';
-
+ 
         const meta = parseMapStateMeta();
         if (!meta) return;
-        if (!meta.exitRef) return;
-
-        if ($gameTemp.isPlaytest())
-            if (NMHN.MapStateM.isShowLogs)
-                console.log('[MapStateM] Exit: ' + getMapTechName());
-
-        runEventPage(meta.exitRef, 'exit');
-    }
-    const _Game_Player_reserveTransfer = Game_Player.prototype.reserveTransfer;
-    Game_Player.prototype.reserveTransfer = function(mapId, x, y, d, type) {
-        _Game_Player_reserveTransfer.call(this, mapId, x, y, d, type);
-
-        // Exit 이벤트가 있는 맵에서만 지연
-        if (!this._mapStateExitPending) { ///중복 풀 등록 방지 조건 코드
-            //[WTF] 이 조건식 없으면 게임 실행 오류 남...
-            const meta = parseMapStateMeta();
-            if (meta)
-                if (meta.exitRef)
-                {
-                    if (stateKey === 'update') {
-                        NMHN.MapStateM.Exit();             // Exit interp를 풀에 등록
-                        this._mapStateExitPending = true;  // 이동 지연 플래그
-                    } else if (stateKey === 'enter') {
-                        this._mapStateExitPending = true;
-                        this._mapStateExitDeferred = true;  //exit 이벤트 enter 끝난 후 삽입
-                    }
-                }
+ 
+        if ($gameTemp.isPlaytest()) if (NMHN.MapStateM.isShowLogs) {
+            console.log('[MapStateM] Exit: ' + getMapTechName());
         }
+ 
+        pushInterp(meta.exitRef, 'exit');
     };
-    const _Game_Player_isTransferring = Game_Player.prototype.isTransferring;
-    Game_Player.prototype.isTransferring = function() {
-        if (this._mapStateExitPending) return false;  // Exit 미완료 → 이동 없는 척
-        return _Game_Player_isTransferring.call(this);
-    };
-
-
+ 
+    // -------------------------------------------------------------------------
+    // Pool 처리
+    // -------------------------------------------------------------------------
     let testLogTimer = 0;
-    NMHN.MapStateM.Update = function() {
-        if (stateKey != 'update') return;
-
-        if ($gameTemp.isPlaytest()) 
-            if (NMHN.MapStateM.isShowLogs) {
+ 
+    NMHN.MapStateM.processPool = function () {
+        const pool = $gameMap._msPool;
+        if (!pool) return;
+ 
+        // 1) pool 순회: update 실행, 끝난 것은 제거
+        let i = 0;
+        while (i < pool.length) {
+            const interp = pool[i];
+            interp.update();
+ 
+            if (interp.isRunning()) {
+                i++;
+                continue;
+            }
+ 
+            // 완료된 interp 처리
+            if (interp._msRole === 'exit') {
+                $gamePlayer._mapStateExitPending = false; // 이동 지연 해제
+            }
+            pool.splice(i, 1);
+        }
+ 
+        // 2) enter -> update 전환
+        if (stateKey === 'enter') if (!isRoleRunning('enter')) {
+            stateKey = 'update';
+ 
+            if ($gamePlayer._mapStateExitDeferred) {
+                $gamePlayer._mapStateExitDeferred = false;
+                NMHN.MapStateM.Exit();
+            }
+        }
+ 
+        // 3) update 상태 로직 (Update interp 종료 시 재호출하는 재귀 방식)
+        if (stateKey === 'update') {
+            // 로그
+            if ($gameTemp.isPlaytest()) if (NMHN.MapStateM.isShowLogs) {
                 if (testLogTimer >= NMHN.MapStateM.updateFrequency) {
                     console.log('[MapStateM] Update: ' + getMapTechName());
                     testLogTimer = 0;
                 }
-                testLogTimer++;
+                ++testLogTimer;
             }
-
-        //업데이트 풀 재등록
-        const meta = parseMapStateMeta();
-        if (!meta) return;
-        if (!meta.updateRef) return;
-
-        // 이미 update role이 실행 중이면 새로 추가하지 않음
-        const running = $gameMap._mapStateInterps.some(i => i._msRole === 'update');
-        if (running) return;
-        runEventPage(meta.updateRef, 'update');
-    }
-    const _Scene_Map_update = Scene_Map.prototype.update;
-    Scene_Map.prototype.update = function() {
-        _Scene_Map_update.call(this);
-
-        // enter 이벤트가 완료된 순간부터 update 시작
-        if (stateKey === 'enter') {
-            if (!$gameMap._mapStateInterps.some(i => i._msRole === 'enter')) {
-                stateKey = 'update';
-                //exit 지연 상태일 시
-                if ($gamePlayer._mapStateExitDeferred) {
-                    $gamePlayer._mapStateExitDeferred = false;
-                    NMHN.MapStateM.Exit();
+ 
+            if (!isRoleRunning('update')) {
+                const meta = parseMapStateMeta();
+                if (meta && meta.updateRef) {
+                    pushInterp(meta.updateRef, 'update');
                 }
             }
         }
 
-        // 풀 업데이트 — 완료된 것은 제거(Update는 완료 후 풀에서 제거 후 Update 함수에서 재등록하는 구조)
-        var interps = $gameMap._mapStateInterps;
-        var index = 0;
-        while (index < interps.length) {
-            var interp = interps[index];
-            interp.update();
-            var stillRunning = interp.isRunning();
-
-            // Exit 이벤트가 완료된 순간 → 맵 이동 지연 해제
-            if (!stillRunning && interp._msRole === 'exit') {
-                $gamePlayer._mapStateExitPending = false;
-            }
-            if (!stillRunning) {
-                interps.splice(index, 1);
-            } else {
-                index++;
-            }
+        // exit interp 끝 여부는 다른 위치에서 pending 해제로 확인.
+    };
+ 
+    const _Game_Map_update = Game_Map.prototype.update;
+    Game_Map.prototype.update = function (sceneActive) {
+        _Game_Map_update.call(this, sceneActive);
+        NMHN.MapStateM.processPool();
+    };
+ 
+    // =========================================================================
+    // 엔진 연동 패치
+    // -------------------------------------------------------------------------
+    // pool 안의 Game_Interpreter 들은 엔진이 모르는 별도 객체이므로,
+    // "이벤트 실행 중"이라는 사실과 "이동 지연"을 엔진에게 알려주기 위해
+    // 아래 세 오버라이드가 계속 필요함
+    // =========================================================================
+ 
+    // enter/exit 진행 중엔 플레이어 조작 불가 처리
+    const _Game_Map_isEventRunning = Game_Map.prototype.isEventRunning;
+    Game_Map.prototype.isEventRunning = function () {
+        if (_Game_Map_isEventRunning.call(this)) return true;
+        if (this._msPool) {
+            return this._msPool.some(i => (i._msRole === 'enter' || i._msRole === 'exit') && i.isRunning());
         }
+        return false;
+    };
+ 
+    // 맵 이동 예약 시 exit 이벤트를 먼저 걸어주는 후크
+    const _Game_Player_reserveTransfer = Game_Player.prototype.reserveTransfer;
+    Game_Player.prototype.reserveTransfer = function (mapId, x, y, d, type) {
+        _Game_Player_reserveTransfer.call(this, mapId, x, y, d, type);
+ 
+        // 같은 맵 내에서 이동이라 enter exit를 타지 않는 예외 처리
+        if (mapId === $gameMap._mapId) return;
 
-        NMHN.MapStateM.Update();
+        if (this._mapStateExitPending) return; // 중복 등록 방지
+ 
+        const meta = parseMapStateMeta();
+        if (!meta || !meta.exitRef) return;
+ 
+        if (stateKey === 'update') {
+            NMHN.MapStateM.Exit();            // exit interp를 pool에 등록
+            this._mapStateExitPending = true; // 이동 지연 플래그
+        } else if (stateKey === 'enter') {
+            // enter가 아직 안 끝났으면, enter 종료 시점에 exit를 걸도록 예약만 해둠
+            this._mapStateExitPending = true;
+            this._mapStateExitDeferred = true;
+        }
+    };
+ 
+    // exit가 끝날 때까지 실제 전송을 미룸
+    const _Game_Player_isTransferring = Game_Player.prototype.isTransferring;
+    Game_Player.prototype.isTransferring = function () {
+        if (this._mapStateExitPending) return false; // exit 미완료 -> 이동 없는 척
+        return _Game_Player_isTransferring.call(this);
     };
 })();
