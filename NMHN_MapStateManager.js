@@ -40,6 +40,20 @@ NMHN.MapStateM.version = 1.00;
  * Default: 9999
  * @default 9999
  * 
+ * @param ---Third Party---
+ * @default
+ * 
+ * @param ---Parallel Process Manager---
+ * @parent ---Third Party---
+ * @default
+ * 
+ * @param Map Update State Delay
+ * @parent ---Parallel Process Manager---
+ * @type number
+ * @desc update에 기본으로 넣을 호출 딜레이. 0일 시 수동 딜레이 비활성화, -1이하일 시 PPM-Event Update Delay 참조
+ * @default 0
+ * @min -1
+ * 
  * @help
  * ============================================================================
  * 사용법
@@ -63,6 +77,11 @@ NMHN.MapStateM.version = 1.00;
  * Enter  : 맵 진입 시(이동 시작 전)
  * Exit   : 맵을 떠나는 순간(이동 시작 전)
  * Update : 해당 맵 내 상시 루프
+ * 
+ * ---------
+ * ThirdParty
+ * ---------
+ * NMHN_ParallelProcessM.js보다 하단에 배치
  *
  * ============================================================================
  * 사용 약관
@@ -77,6 +96,8 @@ NMHN.MapStateM.version = 1.00;
  * ============================================================================
  * Changelog
  * ============================================================================
+ * Version 2.10:
+ * PPM.js 확장 기능 추가
  * Version 2.00:
  * new Game_Interpreter 생성 방식으로 구조 변경
  * Version 1.02:
@@ -97,6 +118,10 @@ NMHN.MapStateM.version = 1.00;
     NMHN.MapStateM.isShowLogs = JSON.parse(Params['Show Logic Logs']);
     NMHN.MapStateM.isShowDetailLogs = JSON.parse(Params['Show Detail Logic Logs']);
     NMHN.MapStateM.updateFrequency = JSON.parse(Params['Update Event Frequency']);
+    if (NMHN.PPM) {
+        NMHN.PPM.mapUpdateStateDelay = JSON.parse(Params['Map Update State Delay']);
+        NMHN.PPM.mapUpdateStateDelay = NMHN.PPM.mapUpdateStateDelay >= 0 ? NMHN.PPM.mapUpdateStateDelay : NMHN.PPM.eventUpdateDelay;
+    }
 
     // =========================================================================
     // 맵 메모 파싱
@@ -166,10 +191,20 @@ NMHN.MapStateM.version = 1.00;
  
     function pushInterp(_ref, _role) {  //이벤트 등록 (new Game_Interpreter 방식)
         if (!_ref) return false;
-        const list = getEventPageList(_ref.eventId, _ref.pageIndex);
+        let list = getEventPageList(_ref.eventId, _ref.pageIndex);
         if (!list) return false;
  
         const interp = new Game_Interpreter(0);
+
+        if (NMHN.PPM && _role === 'update') {   // PPM.js 로직
+            const delay = calcUpdateDelay(_ref.eventId);
+            if (delay > 0) {
+                list = list.concat([{ code: 230, indent: 0, parameters: [delay] }]);
+            }
+            msUpdateFrameCount += delay > 0 ? delay : 1;
+            interp._parallelFrameCount = msUpdateFrameCount;
+        }
+
         interp.setup(list, _ref.eventId);
         interp._msRole = _role;
         $gameMap._msPool.push(interp);
@@ -198,6 +233,7 @@ NMHN.MapStateM.version = 1.00;
         _Game_Map_setup.call(this, mapId);
         this._msPool = [];
         stateKey = 'enter';
+        if (NMHN.PPM) { msUpdateFrameCount = 0; }
         NMHN.MapStateM.Enter();
     };
  
@@ -332,4 +368,33 @@ NMHN.MapStateM.version = 1.00;
         if (this._mapStateExitPending) return false; // exit 미완료 -> 이동 없는 척
         return _Game_Player_isTransferring.call(this);
     };
+
+    // =========================================================================
+    // ThirdParty 로직
+    // -------------------------------------------------------------------------
+    // NMHN_ParalleProcessM.js
+    // =========================================================================
+    if (NMHN.PPM) {
+        function gcdLocal(a, b) {
+            return b === 0 ? a : gcdLocal(b, a % b);
+        }
+
+        let msUpdateFrameCount = 0; // update 롤 전용 누적 프레임 카운터
+
+        function calcUpdateDelay(eventId) {
+            const ev = $dataMap.events[eventId];
+            if (!ev) return 0;
+            const parsed = NMHN.PPM.parseDelayTag(ev.note);
+            return parsed !== null ? parsed : (NMHN.PPM.mapUpdateStateDelay || 0);
+        }
+
+        // 업데이트 이벤트 페이지 내 조건분기
+        const _NMHN_PPM_isParallelFrame = NMHN.PPM.isParallelFrame;
+        NMHN.PPM.isParallelFrame = function(interpreter, n) {
+            if (interpreter._parallelFrameCount !== undefined) {
+                return interpreter._parallelFrameCount % n === 0;
+            }
+            return _NMHN_PPM_isParallelFrame.call(this, interpreter, n);
+        };
+    }
 })();
